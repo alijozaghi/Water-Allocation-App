@@ -9,7 +9,6 @@ from scipy.optimize import minimize
 # 💧 Water Allocation + Desalination Web App (Streamlit)
 #   • Interval-aware Bois d'Arc cap (annual average in MGD)
 #   • User-selectable desal policy with per-facility floors
-#   • Optional DAILY plant caps with curtailment reporting
 #   • Ratio modes: Manual / Capacity-based / Optimized (with avg-MGD floors)
 #   • Reference SCADA picked by YEAR (CSV has columns as years)
 #   • Results table shown first; plots selectable without recompute
@@ -163,7 +162,7 @@ def compute_demands_desal(
     interval_start_str, interval_end_str, shift_where: str, include_end: bool,
     # Desal policy + floors + efficiency
     desal_policy: str, floor_wylie: float, floor_taw: float, desal_efficiency: float,
-    # Optional daily plant caps
+    # Optional daily plant caps (used internally by optimizer only)
     enforce_daily_caps: bool,
     Wylie_Cap: float = None, Leonard_Cap: float = None, Tawakoni_Cap: float = None,
 ):
@@ -191,10 +190,10 @@ def compute_demands_desal(
 
     cap_report = None
 
-    # ---------------- Optional daily plant caps ----------------
+    # ---------------- Optional daily plant caps (only when optimizer requests it) ----------------
     if enforce_daily_caps:
         if Wylie_Cap is None or Leonard_Cap is None or Tawakoni_Cap is None:
-            st.error("❌ Please provide all three plant caps when 'Enforce daily caps' is enabled.")
+            st.error("❌ Please provide all three plant caps when caps are enforced.")
             st.stop()
 
         Wylie_excess    = np.maximum(Wylie_pre    - float(Wylie_Cap),    0.0)
@@ -228,7 +227,7 @@ def compute_demands_desal(
     # ---------------- Leonard split (after rebalancing) ----------------
     Texoma_L = np.minimum(Leonard_D / (Mix_Ratio_To_Leonard + 1.0), Pipe_Cap_To_Leonard)
     BoisD_L  = Leonard_D - Texoma_L
-#############################################################
+    #############################################################
     # ✅ Correct DataFrame creation 
     df2 = pd.DataFrame({ "Date": dates, "Wylie_D": Wylie_D, "Leonard_D": Leonard_D, "Texoma_L": Texoma_L, "BoisD_L": BoisD_L }) 
     # ✅ Correct conditional assignment 
@@ -239,8 +238,7 @@ def compute_demands_desal(
     Wylie_D=df2["Wylie_D"].values
     Leonard_D=df2["Leonard_D"].values 
     BoisD_L=df2["BoisD_L"].values
-###############################################################
-
+    ###############################################################
 
     # ---------------- Desal capacity from Leonard pipe remainder ----------------
     # Efficiency: need 59 raw to produce 50 desaled ⇒ efficiency = 50/59
@@ -378,27 +376,55 @@ def optimize_ratios_with_desal(
     Max_Avg_From_Bois_DARC,
     interval_start_str, interval_end_str, shift_where, include_end,
     desal_policy, floor_wylie, floor_taw, desal_efficiency,
-    # UI caps (may be None); optimizer will use defaults if None
     enforce_daily_caps, Wylie_Cap, Leonard_Cap, Tawakoni_Cap,
-    # avg-MGD floors for optimization
     Wylie_floor_opt, Leonard_floor_opt, Tawakoni_floor_opt,
 ):
-    # Caps used for OPTIMIZATION (always enforced here)
-    Wcap_opt = float(Wylie_Cap if Wylie_Cap is not None else DEFAULT_WYLIE_CAP)
-    Lcap_opt = float(Leonard_Cap if Leonard_Cap is not None else DEFAULT_LEONARD_CAP)
-    Tcap_opt = float(Tawakoni_Cap if Tawakoni_Cap is not None else DEFAULT_TAWAKONI_CAP)
+    """
+    Optimize ratios (rW, rL, rT) to maximize Texoma use
+    while satisfying:
+      - Sum of ratios = 1
+      - Peak flow at each plant <= its capacity (entered by user)
+      - Each plant's yearly average >= floor
+      - All other hydraulic + desal constraints
+    """
 
-    # Initial guess: capacity-based
-    total_cap = Wcap_opt + Lcap_opt + Tcap_opt
-    x0 = np.array([Wcap_opt/total_cap, Lcap_opt/total_cap, Tcap_opt/total_cap])
+    st.subheader("🔧 Optimization: Define Plant Capacities")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        Wcap_opt = st.number_input("Wylie Plant Capacity (MGD)", value=DEFAULT_WYLIE_CAP, min_value=0.0)
+    with col2:
+        Lcap_opt = st.number_input("Leonard Plant Capacity (MGD)", value=DEFAULT_LEONARD_CAP, min_value=0.0)
+    with col3:
+        Tcap_opt = st.number_input("Tawakoni Plant Capacity (MGD)", value=DEFAULT_TAWAKONI_CAP, min_value=0.0)
 
-    # Bounds [0,1]
-    bounds = [(0.0, 1.0)] * 3
+    # --- Compute peak-based ratio limits ---
+    if Peak_Day_Demand <= 0:
+        st.error("❌ Peak Day Demand must be > 0.")
+        st.stop()
 
-    # Sum-to-one equality
+    rmax_W = min(1.0, Wcap_opt / Peak_Day_Demand)
+    rmax_L = min(1.0, Lcap_opt / Peak_Day_Demand)
+    rmax_T = min(1.0, Tcap_opt / Peak_Day_Demand)
+
+    # --- Feasibility check ---
+    if (rmax_W + rmax_L + rmax_T) < 1.0 - 1e-6:
+        st.error(
+            f"❌ Infeasible setup:\n"
+            f"Total capacity ({Wcap_opt + Lcap_opt + Tcap_opt:.1f} MGD) "
+            f"is insufficient to meet Peak Day Demand ({Peak_Day_Demand:.1f} MGD)."
+        )
+        st.stop()
+
+    # --- Initial guess based on available headroom ---
+    rmax = np.array([rmax_W, rmax_L, rmax_T])
+    x0 = rmax / rmax.sum()
+
+    # --- Bounds per capacity ---
+    bounds = [(0.0, rmax_W), (0.0, rmax_L), (0.0, rmax_T)]
+
+    # --- Constraints: sum=1 and avg-MGD floors ---
     cons = [{"type": "eq", "fun": lambda x: np.sum(x) - 1.0}]
 
-    # Avg-MGD floors as inequality constraints (fun(x) >= 0)
     cons += [
         {"type": "ineq", "fun": lambda r: _avg_mgd_constraint("W", r,
             Year, SCADA_Data, Peak_Day_Demand,
@@ -432,8 +458,13 @@ def optimize_ratios_with_desal(
         )},
     ]
 
+    # --- Run optimizer ---
     res = minimize(
-        _objective_max_texoma_with_desal, x0=x0, method="SLSQP", bounds=bounds, constraints=cons,
+        _objective_max_texoma_with_desal,
+        x0=x0,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=cons,
         args=(
             Year, SCADA_Data, Peak_Day_Demand,
             Mix_Ratio_To_Wylie, Mix_Ratio_To_Leonard,
@@ -443,17 +474,26 @@ def optimize_ratios_with_desal(
             desal_policy, floor_wylie, floor_taw, desal_efficiency,
             Wcap_opt, Lcap_opt, Tcap_opt,
         ),
-        options={"maxiter": 200}
+        options={"maxiter": 400, "ftol": 1e-9}
     )
 
-    # If optimizer fails or violates constraints slightly, clip and renormalize
+    # --- Post-processing ---
     r = np.clip(res.x if res.success else x0, 0.0, 1.0)
     s = r.sum()
     if s <= 0:
         r = x0
     else:
-        r = r / s
+        r /= s
+
+    st.success(
+        f"Optimized ratios → "
+        f"Wylie={r[0]:.3f} (≤ {rmax_W:.3f}), "
+        f"Leonard={r[1]:.3f} (≤ {rmax_L:.3f}), "
+        f"Tawakoni={r[2]:.3f} (≤ {rmax_T:.3f})"
+    )
+
     return r
+
 
 # -------------------------------
 # Plot helpers
@@ -522,16 +562,6 @@ desal_efficiency = parse_efficiency_text(_desal_eff_text)
 floor_wylie = st.sidebar.number_input("Wylie floor (MGD)", value=5.0, min_value=0.0)
 floor_taw   = st.sidebar.number_input("Tawakoni floor (MGD)", value=5.0, min_value=0.0)
 
-# Optional daily plant caps (for the final run/plots; optimizer enforces its own caps regardless)
-st.sidebar.subheader("Daily Plant Caps (optional)")
-st.sidebar.caption("If enabled, **daily** treated demand at each plant is capped. Excess above the cap is **curtailed** (not reallocated). You'll get a summary of any curtailments.")
-enforce_daily_caps = st.sidebar.checkbox("Enforce daily plant caps", value=False)
-Wylie_Cap = Leonard_Cap = Tawakoni_Cap = None
-if enforce_daily_caps:
-    Wylie_Cap    = st.sidebar.number_input("Wylie Plant Capacity (MGD)",    value=DEFAULT_WYLIE_CAP, help="Daily max treated at Wylie")
-    Leonard_Cap  = st.sidebar.number_input("Leonard Plant Capacity (MGD)",  value=DEFAULT_LEONARD_CAP, help="Daily max treated at Leonard")
-    Tawakoni_Cap = st.sidebar.number_input("Tawakoni Plant Capacity (MGD)", value=DEFAULT_TAWAKONI_CAP,  help="Daily max treated at Tawakoni")
-
 # SCADA upload with reference year selection
 uploaded_file = st.sidebar.file_uploader("Upload SCADA CSV (columns named by year)", type="csv")
 if not uploaded_file:
@@ -568,11 +598,11 @@ if mode == "Manual":
     st.subheader("Manual Ratios (must sum to 1)")
     col1, col2, col3 = st.columns(3)
     with col1:
-        rW = st.slider("Wylie Ratio", 0.0, 1.0, 0.82, 0.01)
+        rW = st.slider("Wylie Ratio", 0.0, 1.0, 0.65, 0.01)
     with col2:
-        rL = st.slider("Leonard Ratio", 0.0, 1.0, 0.15, 0.01)
+        rL = st.slider("Leonard Ratio", 0.0, 1.0, 0.2, 0.01)
     with col3:
-        rT = st.slider("Tawakoni Ratio", 0.0, 1.0, 0.03, 0.01)
+        rT = st.slider("Tawakoni Ratio", 0.0, 1.0, 0.15, 0.01)
     ratio_sum = rW + rL + rT
     if abs(ratio_sum - 1.0) > 1e-6:
         st.error(f"❌ Ratios must sum to 1. Current sum = {ratio_sum:.2f}")
@@ -604,8 +634,8 @@ else:
         Max_Avg_From_Bois_DARC,
         interval_start_str, interval_end_str, shift_where, include_end,
         desal_policy, floor_wylie, floor_taw, desal_efficiency,
-        enforce_daily_caps, Wylie_Cap, Leonard_Cap, Tawakoni_Cap,
-        Wylie_floor_opt, Leonard_floor_opt, Tawakoni_floor_opt,
+        enforce_daily_caps=False, Wylie_Cap=None, Leonard_Cap=None, Tawakoni_Cap=None,
+        Wylie_floor_opt=Wylie_floor_opt, Leonard_floor_opt=Leonard_floor_opt, Tawakoni_floor_opt=Tawakoni_floor_opt,
     )
     st.success(f"Optimized ratios → Wylie={rW:.3f}, Leonard={rL:.3f}, Tawakoni={rT:.3f}")
 
@@ -640,13 +670,12 @@ if 'results' not in st.session_state:
 if 'sig' not in st.session_state:
     st.session_state['sig'] = None
 
-# Build a simple signature of the current inputs
+# Build a simple signature of the current inputs (caps UI removed)
 _cur_sig = (
     Year, float(Peak_Day_Demand), float(Mix_Ratio_To_Wylie), float(Mix_Ratio_To_Leonard),
     float(Pipe_Cap_To_Wylie), float(Pipe_Cap_To_Leonard), float(Max_Avg_From_Bois_DARC),
     interval_start_str, interval_end_str, include_end, shift_where,
     desal_policy, float(desal_efficiency), float(floor_wylie), float(floor_taw),
-    bool(enforce_daily_caps), float(Wylie_Cap or 0), float(Leonard_Cap or 0), float(Tawakoni_Cap or 0),
     float(rW), float(rL), float(rT), str(ref_year), len(SCADA_Data_col), float(SCADA_Data_col.sum()),
     float(Wylie_floor_opt), float(Leonard_floor_opt), float(Tawakoni_floor_opt)
 )
@@ -680,8 +709,7 @@ if run:
         shift_where=shift_where, include_end=include_end,
         desal_policy=desal_policy, floor_wylie=floor_wylie, floor_taw=floor_taw,
         desal_efficiency=desal_efficiency,
-        enforce_daily_caps=enforce_daily_caps,
-        Wylie_Cap=Wylie_Cap, Leonard_Cap=Leonard_Cap, Tawakoni_Cap=Tawakoni_Cap,
+        enforce_daily_caps=False  # UI caps removed
     )
 
     # Build DataFrame (rounded) and stash in session state
@@ -718,7 +746,7 @@ if run:
         "Total_Demand": Total_Demand,
         "feasible_bois": feasible_bois,
         "achieved_bois_avg": achieved_bois_avg,
-        "cap_report": cap_report,
+        "cap_report": cap_report,  # will be None for UI runs
         "sig": _cur_sig,
         "Year": Year,
         "Max_Avg_From_Bois_DARC": Max_Avg_From_Bois_DARC,
@@ -747,10 +775,7 @@ if st.session_state['results'] is not None:
         st.metric("Annual Avg Tawakoni WT (MGD)", f"{np.mean(res['Tawakoni_D']):.1f}")    
     with k4:
         st.metric("Annual Avg Total Demand (MGD)", f"{np.mean(res['Total_Demand']):.1f}")    
-     
-#    with k1:
-#        st.metric("Achieved Bois d'Arc Avg (MGD)", f"{res['achieved_bois_avg']:.1f}",
-#                  delta=f"Target {res['Max_Avg_From_Bois_DARC']:.1f}")
+
     k5 , k6 , k7, k8 = st.columns(4)
     with k5:
         st.metric("Annual Avg Lavon → Wylie (MGD)", f"{np.mean(res['Lavon_W']):.1f}")
@@ -761,7 +786,6 @@ if st.session_state['results'] is not None:
                   delta=f"Target {res['Max_Avg_From_Bois_DARC']:.1f}")
     with k8:
         st.metric("Annual Avg Texoma → Leonard (MGD)", f"{np.mean(res['Texoma_L']):.1f}")
-
 
     k9, k10, k11, k12 = st.columns(4)
     with k9:
@@ -774,20 +798,6 @@ if st.session_state['results'] is not None:
     with k12:
         st.metric("Sum of Lakes (MGD)", f"{np.mean(res['Lavon_W'])+np.mean(res['Texoma_W'])+np.mean(res['BoisD_L'])+np.mean(res['Texoma_L'])+np.mean(res['Tawakoni_D'])+np.mean(res['Desal']):.1f}",
                   delta=f"Total Demand {np.mean(res['Total_Demand']):.1f}")
-
-
-    # Cap curtailment reporting
-    if res["cap_report"] is not None:
-        cr = res["cap_report"]
-        msgs = []
-        for plant in ["Wylie", "Leonard", "Tawakoni"]:
-            if cr[plant]["days"] > 0:
-                msgs.append(f"- {plant}: {cr[plant]['days']} day(s) over cap; curtailed **{cr[plant]['curtailed_MG']:.1f} MG** total.")
-        if msgs:
-            summary = "**Daily Plant Caps:** Flow exceeded caps on:\n" + "\n".join(msgs)
-            st.warning(summary)
-        else:
-            st.success("Daily Plant Caps: No exceedances — all days within caps.")
 
     # Results table first (scrollable)
     st.subheader("Results (Daily)")
