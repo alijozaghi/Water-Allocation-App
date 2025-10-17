@@ -48,25 +48,6 @@ A **Streamlit-based decision-support application** for projecting and optimizing
 
 ---
 
-## ⚙️ Installation
-
-```bash
-# 1. Clone this repository
-git clone https://github.com/<your-username>/water-allocation-desal.git
-cd water-allocation-desal
-
-# 2. Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate   # On Windows: venv\Scripts\activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Run the Streamlit app
-streamlit run app.py
-```
-
----
 
 ## 📁 Input Data
 
@@ -133,4 +114,5 @@ This project is distributed under the **MIT License**.
 Feel free to use, modify, and distribute with proper attribution.
 
 ---
+
 
