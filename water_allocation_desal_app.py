@@ -13,6 +13,7 @@ from scipy.optimize import minimize
 #   • Reference SCADA picked by YEAR (CSV has columns as years)
 #   • Results table shown first; plots selectable without recompute
 #   • KPIs: Peaks + Averages for key series
+#   • UPDATE: Plant capacities moved to left sidebar (Model Parameters)
 # =========================================================
 
 st.set_page_config(page_title="Water Allocation + Desal", layout="wide")
@@ -340,6 +341,7 @@ def _objective_max_texoma_with_desal(
     # maximize Total_From_Tex
     return -float(np.sum(Total_From_Tex))
 
+
 def _avg_mgd_constraint(which,
     r,
     Year, SCADA_Data, Peak_Day_Demand,
@@ -369,6 +371,7 @@ def _avg_mgd_constraint(which,
     avg = {"W": np.mean(Wylie_D), "L": np.mean(Leonard_D), "T": np.mean(Tawakoni_D)}[which]
     return float(avg - floor_mgd)  # >= 0 means OK
 
+
 def optimize_ratios_with_desal(
     Year, SCADA_Data, Peak_Day_Demand,
     Mix_Ratio_To_Wylie, Mix_Ratio_To_Leonard,
@@ -376,7 +379,8 @@ def optimize_ratios_with_desal(
     Max_Avg_From_Bois_DARC,
     interval_start_str, interval_end_str, shift_where, include_end,
     desal_policy, floor_wylie, floor_taw, desal_efficiency,
-    enforce_daily_caps, Wylie_Cap, Leonard_Cap, Tawakoni_Cap,
+    # capacities now provided from sidebar (moved here)
+    Wylie_Cap_opt, Leonard_Cap_opt, Tawakoni_Cap_opt,
     Wylie_floor_opt, Leonard_floor_opt, Tawakoni_floor_opt,
 ):
     """
@@ -386,31 +390,24 @@ def optimize_ratios_with_desal(
       - Peak flow at each plant <= its capacity (entered by user)
       - Each plant's yearly average >= floor
       - All other hydraulic + desal constraints
-    """
 
-    st.subheader("🔧 Optimization: Define Plant Capacities")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        Wcap_opt = st.number_input("Wylie Plant Capacity (MGD)", value=DEFAULT_WYLIE_CAP, min_value=0.0)
-    with col2:
-        Lcap_opt = st.number_input("Leonard Plant Capacity (MGD)", value=DEFAULT_LEONARD_CAP, min_value=0.0)
-    with col3:
-        Tcap_opt = st.number_input("Tawakoni Plant Capacity (MGD)", value=DEFAULT_TAWAKONI_CAP, min_value=0.0)
+    NOTE: Capacity inputs are now passed in from the left sidebar, not collected here.
+    """
 
     # --- Compute peak-based ratio limits ---
     if Peak_Day_Demand <= 0:
         st.error("❌ Peak Day Demand must be > 0.")
         st.stop()
 
-    rmax_W = min(1.0, Wcap_opt / Peak_Day_Demand)
-    rmax_L = min(1.0, Lcap_opt / Peak_Day_Demand)
-    rmax_T = min(1.0, Tcap_opt / Peak_Day_Demand)
+    rmax_W = min(1.0, Wylie_Cap_opt / Peak_Day_Demand)
+    rmax_L = min(1.0, Leonard_Cap_opt / Peak_Day_Demand)
+    rmax_T = min(1.0, Tawakoni_Cap_opt / Peak_Day_Demand)
 
     # --- Feasibility check ---
     if (rmax_W + rmax_L + rmax_T) < 1.0 - 1e-6:
         st.error(
             f"❌ Infeasible setup:\n"
-            f"Total capacity ({Wcap_opt + Lcap_opt + Tcap_opt:.1f} MGD) "
+            f"Total capacity ({Wylie_Cap_opt + Leonard_Cap_opt + Tawakoni_Cap_opt:.1f} MGD) "
             f"is insufficient to meet Peak Day Demand ({Peak_Day_Demand:.1f} MGD)."
         )
         st.stop()
@@ -433,7 +430,7 @@ def optimize_ratios_with_desal(
             Max_Avg_From_Bois_DARC,
             interval_start_str, interval_end_str, shift_where, include_end,
             desal_policy, floor_wylie, floor_taw, desal_efficiency,
-            Wcap_opt, Lcap_opt, Tcap_opt,
+            Wylie_Cap_opt, Leonard_Cap_opt, Tawakoni_Cap_opt,
             Wylie_floor_opt,
         )},
         {"type": "ineq", "fun": lambda r: _avg_mgd_constraint("L", r,
@@ -443,7 +440,7 @@ def optimize_ratios_with_desal(
             Max_Avg_From_Bois_DARC,
             interval_start_str, interval_end_str, shift_where, include_end,
             desal_policy, floor_wylie, floor_taw, desal_efficiency,
-            Wcap_opt, Lcap_opt, Tcap_opt,
+            Leonard_Cap_opt, Leonard_Cap_opt, Tawakoni_Cap_opt,
             Leonard_floor_opt,
         )},
         {"type": "ineq", "fun": lambda r: _avg_mgd_constraint("T", r,
@@ -453,7 +450,7 @@ def optimize_ratios_with_desal(
             Max_Avg_From_Bois_DARC,
             interval_start_str, interval_end_str, shift_where, include_end,
             desal_policy, floor_wylie, floor_taw, desal_efficiency,
-            Wcap_opt, Lcap_opt, Tcap_opt,
+            Wylie_Cap_opt, Leonard_Cap_opt, Tawakoni_Cap_opt,
             Tawakoni_floor_opt,
         )},
     ]
@@ -472,7 +469,7 @@ def optimize_ratios_with_desal(
             Max_Avg_From_Bois_DARC,
             interval_start_str, interval_end_str, shift_where, include_end,
             desal_policy, floor_wylie, floor_taw, desal_efficiency,
-            Wcap_opt, Lcap_opt, Tcap_opt,
+            Wylie_Cap_opt, Leonard_Cap_opt, Tawakoni_Cap_opt,
         ),
         options={"maxiter": 400, "ftol": 1e-9}
     )
@@ -521,6 +518,12 @@ with mid:
 st.sidebar.header("Model Parameters")
 Year = st.sidebar.number_input("Projection Year", min_value=2000, max_value=2100, value=2050, step=1)
 Peak_Day_Demand = st.sidebar.number_input("Peak Day Demand (MGD)", value=1209.0)
+
+# NEW: Plant capacities moved to sidebar
+st.sidebar.subheader("Plant Capacities (MGD)")
+capW_sidebar = st.sidebar.number_input("Wylie capacity (MGD)", value=DEFAULT_WYLIE_CAP)
+capL_sidebar = st.sidebar.number_input("Leonard capacity (MGD)", value=DEFAULT_LEONARD_CAP)
+capT_sidebar = st.sidebar.number_input("Tawakoni capacity (MGD)", value=DEFAULT_TAWAKONI_CAP)
 
 # Mix ratios (default guidance: Wylie Lavon:Texoma=4:1, Leonard BoisD:Texoma=3:1)
 Mix_Ratio_To_Wylie   = st.sidebar.number_input("Mixing Ratio (Lavon:Texoma)",   value=4.0)
@@ -611,22 +614,20 @@ if mode == "Manual":
 
 elif mode == "Capacity-based":
     st.subheader("Capacity-based Ratios")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        capW = st.number_input("Wylie capacity (MGD)", value=DEFAULT_WYLIE_CAP)
-    with c2:
-        capL = st.number_input("Leonard capacity (MGD)", value=DEFAULT_LEONARD_CAP)
-    with c3:
-        capT = st.number_input("Tawakoni capacity (MGD)", value=DEFAULT_TAWAKONI_CAP)
-    total_cap_ratio = capW + capL + capT
+    # capacities now come from sidebar
+    total_cap_ratio = capW_sidebar + capL_sidebar + capT_sidebar
     if total_cap_ratio <= 0:
         st.error("❌ Sum of capacities must be > 0 for capacity-based ratios.")
         st.stop()
-    rW, rL, rT = capW/total_cap_ratio, capL/total_cap_ratio, capT/total_cap_ratio
-    st.info(f"Selected ratios (capacity-based) → Wylie={rW:.3f}, Leonard={rL:.3f}, Tawakoni={rT:.3f}")
+    rW, rL, rT = capW_sidebar/total_cap_ratio, capL_sidebar/total_cap_ratio, capT_sidebar/total_cap_ratio
+    st.info(
+        f"Selected ratios (capacity-based) → Wylie={rW:.3f}, Leonard={rL:.3f}, Tawakoni={rT:.3f} "
+        f"using caps W={capW_sidebar:.1f}, L={capL_sidebar:.1f}, T={capT_sidebar:.1f} MGD"
+    )
 
 else:
     st.subheader("Optimized Ratios (maximize Texoma usage, respect caps, keep all plants on)")
+    # capacities now come from sidebar
     rW, rL, rT = optimize_ratios_with_desal(
         Year, SCADA_Data_col, Peak_Day_Demand,
         Mix_Ratio_To_Wylie, Mix_Ratio_To_Leonard,
@@ -634,7 +635,7 @@ else:
         Max_Avg_From_Bois_DARC,
         interval_start_str, interval_end_str, shift_where, include_end,
         desal_policy, floor_wylie, floor_taw, desal_efficiency,
-        enforce_daily_caps=False, Wylie_Cap=None, Leonard_Cap=None, Tawakoni_Cap=None,
+        capW_sidebar, capL_sidebar, capT_sidebar,
         Wylie_floor_opt=Wylie_floor_opt, Leonard_floor_opt=Leonard_floor_opt, Tawakoni_floor_opt=Tawakoni_floor_opt,
     )
     st.success(f"Optimized ratios → Wylie={rW:.3f}, Leonard={rL:.3f}, Tawakoni={rT:.3f}")
@@ -677,7 +678,8 @@ _cur_sig = (
     interval_start_str, interval_end_str, include_end, shift_where,
     desal_policy, float(desal_efficiency), float(floor_wylie), float(floor_taw),
     float(rW), float(rL), float(rT), str(ref_year), len(SCADA_Data_col), float(SCADA_Data_col.sum()),
-    float(Wylie_floor_opt), float(Leonard_floor_opt), float(Tawakoni_floor_opt)
+    float(Wylie_floor_opt), float(Leonard_floor_opt), float(Tawakoni_floor_opt),
+    float(capW_sidebar), float(capL_sidebar), float(capT_sidebar),
 )
 
 params_changed = (st.session_state['sig'] is not None and st.session_state['sig'] != _cur_sig)
@@ -709,7 +711,7 @@ if run:
         shift_where=shift_where, include_end=include_end,
         desal_policy=desal_policy, floor_wylie=floor_wylie, floor_taw=floor_taw,
         desal_efficiency=desal_efficiency,
-        enforce_daily_caps=False  # UI caps removed
+        enforce_daily_caps=False  # UI caps removed for non-optimization runs
     )
 
     # Build DataFrame (rounded) and stash in session state
