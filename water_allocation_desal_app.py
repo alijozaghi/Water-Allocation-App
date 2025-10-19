@@ -14,7 +14,7 @@ from scipy.optimize import minimize
 #   • Ratio modes: Manual / Capacity-based / Optimized (with avg-MGD floors)
 #   • Reference SCADA picked by YEAR (now supports CSV or Excel with multi-sheet)
 #   • Leap-year-safe alignment of the selected year to the Projection Year
-#   • Results table shown first; plots selectable without recompute
+#   • Results table shown after plots; plots selectable without recompute
 #   • KPIs: Peaks + Averages for key series
 #   • UPDATE: Plant capacities moved to left sidebar (Model Parameters)
 # =========================================================
@@ -535,7 +535,7 @@ def optimize_ratios_with_desal(
     return r
 
 # -------------------------------
-# Plot helpers
+# Plot helpers (with value/percent annotations)
 # -------------------------------
 def _plot_series(dates, series, title, ylabel, color, extra_line=None):
     avg, total = float(np.mean(series)), float(np.sum(series))
@@ -550,12 +550,105 @@ def _plot_series(dates, series, title, ylabel, color, extra_line=None):
     ax.grid(True, which="both", linestyle="--", alpha=0.35)
     return fig
 
+def _month_labels():
+    return ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+def _monthly_group_average(dates, series):
+    """Return 12-length vector of monthly averages aligned Jan..Dec."""
+    df = pd.DataFrame({"date": pd.to_datetime(dates), "val": np.asarray(series, dtype=float)})
+    df["m"] = df["date"].dt.month
+    return df.groupby("m")["val"].mean().reindex(range(1,13)).values
+
+def _bar_monthly(dates, series, title, ylabel):
+    """Single series monthly average bar with value labels."""
+    vals = _monthly_group_average(dates, series)
+    labels = _month_labels()
+    fig, ax = plt.subplots(figsize=(12,6))
+    ax.bar(np.arange(1,13), vals, tick_label=labels)
+    ax.set_title(title); ax.set_xlabel("MONTH"); ax.set_ylabel(ylabel)
+    for i, v in enumerate(vals, start=1):
+        if np.isfinite(v):
+            ax.text(i, v, f"{v:.1f}", ha="center", va="bottom", fontsize=8)
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    return fig
+
+def _grouped_monthly_three(dates, s1, s2, s3, labels_legend, title, ylabel):
+    """
+    Grouped bars (3 per month).  **No numeric value labels on bars** per request.
+    """
+    m1 = _monthly_group_average(dates, s1)
+    m2 = _monthly_group_average(dates, s2)
+    m3 = _monthly_group_average(dates, s3)
+    labels = _month_labels()
+    x = np.arange(12)
+    width = 0.26
+    fig, ax = plt.subplots(figsize=(12,6))
+    ax.bar(x - width, m1, width, label=labels_legend[0])
+    ax.bar(x,         m2, width, label=labels_legend[1])
+    ax.bar(x + width, m3, width, label=labels_legend[2])
+    ax.set_xticks(x); ax.set_xticklabels(labels)
+    ax.set_title(title); ax.set_xlabel("MONTH"); ax.set_ylabel(ylabel)
+    ax.legend()
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    return fig
+
+def _stacked_monthly_percent(dates, series_dict, title, ylabel):
+    """
+    Stacked bars of monthly averages with percentage labels on each segment.
+    series_dict: Ordered {label: array-like}, typically two series for source mixes.
+    """
+    labels = _month_labels()
+    months = np.arange(1, 13)
+    monthly = {k: _monthly_group_average(dates, v) for k, v in series_dict.items()}
+    order = list(series_dict.keys())
+
+    fig, ax = plt.subplots(figsize=(12,6))
+    bottom = np.zeros(12)
+    bars_by_label = {}
+
+    for label in order:
+        vals = np.asarray(monthly[label], dtype=float)
+        bars = ax.bar(months, vals, bottom=bottom, label=label)
+        bars_by_label[label] = (bars, vals.copy(), bottom.copy())
+        bottom += vals
+
+    # percentage annotations
+    totals = bottom
+    for label in order:
+        bars, vals, bottoms = bars_by_label[label]
+        for i, rect in enumerate(bars):
+            total = totals[i]
+            val = vals[i]
+            if total > 0 and np.isfinite(val):
+                pct = 100.0 * val / total
+                y = bottoms[i] + val/2.0
+                ax.text(rect.get_x() + rect.get_width()/2, y, f"{pct:.0f}%",
+                        ha="center", va="center", fontsize=8, color="black")
+
+    ax.set_title(title); ax.set_xlabel("MONTH"); ax.set_ylabel(ylabel)
+    ax.set_xticks(months); ax.set_xticklabels(labels)
+    ax.legend()
+    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    return fig
+
+def _cumulative_plot(dates, series, title, ylabel):
+    cum = np.cumsum(np.asarray(series, dtype=float))
+    fig, ax = plt.subplots(figsize=(12,6))
+    ax.plot(dates, cum)
+    ax.set_title(title); ax.set_xlabel("DATE"); ax.set_ylabel(ylabel)
+    ax.grid(True, which="both", linestyle="--", alpha=0.35)
+    fig.tight_layout()
+    return fig
+
 # -------------------------------
 # Sidebar: core parameters
 # -------------------------------
 left, mid, right = st.columns([1,3,1])
 with mid:
-    st.title("💧 Water Demand Projection Web APP 💧")
+    st.title("💧 Water Demand Projection Web APP")
 
 st.sidebar.header("Model Parameters")
 Year = st.sidebar.number_input("Projection Year", min_value=2000, max_value=2100, value=2050, step=1)
@@ -847,6 +940,7 @@ if st.session_state['results'] is not None:
     res = st.session_state['results']
     Year_res = res["Year"]
 
+    # KPIs
     k1, k2, k3 , k4 = st.columns(4) 
     with k1:
         st.metric("Annual Avg Wylie WT (MGD)", f"{np.mean(res['Wylie_D']):.1f}")
@@ -880,17 +974,12 @@ if st.session_state['results'] is not None:
         st.metric("Sum of Lakes (MGD)", f"{np.mean(res['Lavon_W'])+np.mean(res['Texoma_W'])+np.mean(res['BoisD_L'])+np.mean(res['Texoma_L'])+np.mean(res['Tawakoni_D'])+np.mean(res['Desal']):.1f}",
                   delta=f"Total Demand {np.mean(res['Total_Demand']):.1f}")
 
-    st.subheader("Results (Daily)")
-    st.dataframe(res['df'], use_container_width=True, height=420)
-
-    with st.expander("Download results as CSV"):
-        file_name = st.text_input("CSV file name", value="WaterResults_Desal.csv")
-        st.download_button("📥 Download CSV", res['df'].to_csv(index=False), file_name=file_name, mime="text/csv")
-
+    # --- Plots (existing + monthly/cumulative) ---
     st.subheader("Plots")
     plot_options = st.multiselect(
         "Select plots to display:",
         [
+            # Existing daily plots
             "Texoma Only",
             "Total Demand",
             "Wylie Demand",
@@ -900,10 +989,25 @@ if st.session_state['results'] is not None:
             "Bois D'Arc Flow (with limit line)",
             "Tawakoni Demand",
             "Desalinated Water",
+            # Monthly & cumulative views
+            "Monthly Avg — Wylie/Leonard/Tawakoni (bar)",
+            "Monthly Avg — Total Demand (bar)",
+            "Monthly Source Mix → Wylie (stacked %)",
+            "Monthly Source Mix → Leonard (stacked %)",
+            "Monthly Avg — Desalinated Water (bar)",
+            "Cumulative From Texoma (line)",
         ],
-        default=["Texoma Only", "Total Demand", "Bois D'Arc Flow (with limit line)", "Desalinated Water"],
+        default=[
+            "Texoma Only",
+            "Total Demand",
+            "Bois D'Arc Flow (with limit line)",
+            "Desalinated Water",
+            "Monthly Avg — Wylie/Leonard/Tawakoni (bar)",
+            "Monthly Source Mix → Wylie (stacked %)",
+        ],
     )
 
+    # Existing daily plots
     if "Texoma Only" in plot_options:
         st.pyplot(_plot_series(res['dates'], res['Total_From_Tex'],
                                f"DAILY WATER FROM TEXOMA ({Year_res})",
@@ -919,7 +1023,7 @@ if st.session_state['results'] is not None:
     if "Wylie Splits (Texoma vs Lavon)" in plot_options:
         fig, ax = plt.subplots(figsize=(12,6))
         ax.plot(res['dates'], res['Texoma_W'], label="Texoma → Wylie", color="blue")
-        ax.plot(res['dates'], res['Lavon_W'],  label="Lavon → Wylie",  color="gray")  # ← fixed line
+        ax.plot(res['dates'], res['Lavon_W'],  label="Lavon → Wylie",  color="gray")
         ax.set_title(f"WYLIE SPLITS ({Year_res})"); ax.set_xlabel("DATE"); ax.set_ylabel("MGD")
         ax.legend(); ax.grid(True, which="both", linestyle="--", alpha=0.35); fig.tight_layout(); st.pyplot(fig)
     if "Leonard Demand" in plot_options:
@@ -944,5 +1048,99 @@ if st.session_state['results'] is not None:
         st.pyplot(_plot_series(res['dates'], res['Desal'],
                                f"DESALINATED WATER — {Year_res}",
                                "DESALED FLOW (MGD)", "black"))
+
+    # Monthly/cumulative plots
+    if any(opt in plot_options for opt in [
+        "Monthly Avg — Wylie/Leonard/Tawakoni (bar)",
+        "Monthly Avg — Total Demand (bar)",
+        "Monthly Source Mix → Wylie (stacked %)",
+        "Monthly Source Mix → Leonard (stacked %)",
+        "Monthly Avg — Desalinated Water (bar)",
+        "Cumulative From Texoma (line)",
+    ]):
+        dates_dt = pd.to_datetime(res['dates'])
+
+    if "Monthly Avg — Wylie/Leonard/Tawakoni (bar)" in plot_options:
+        st.pyplot(_grouped_monthly_three(
+            dates_dt, res['Wylie_D'], res['Leonard_D'], res['Tawakoni_D'],
+            labels_legend=("Wylie", "Leonard", "Tawakoni"),
+            title=f"MONTHLY AVERAGE — PLANT DEMANDS ({Year_res})",
+            ylabel="MGD"
+        ))
+
+    if "Monthly Avg — Total Demand (bar)" in plot_options:
+        st.pyplot(_bar_monthly(dates_dt, res['Total_Demand'],
+                               f"MONTHLY AVERAGE — TOTAL DEMAND ({Year_res})", "MGD"))
+
+    if "Monthly Source Mix → Wylie (stacked %)" in plot_options:
+        st.pyplot(_stacked_monthly_percent(
+            dates_dt,
+            {"Texoma → Wylie": res['Texoma_W'], "Lavon → Wylie": res['Lavon_W']},
+            f"MONTHLY SOURCE MIX → WYLIE ({Year_res})",
+            "MGD (monthly average, % labels by segment)"
+        ))
+
+    if "Monthly Source Mix → Leonard (stacked %)" in plot_options:
+        st.pyplot(_stacked_monthly_percent(
+            dates_dt,
+            {"Texoma → Leonard": res['Texoma_L'], "Bois d'Arc → Leonard": res['BoisD_L']},
+            f"MONTHLY SOURCE MIX → LEONARD ({Year_res})",
+            "MGD (monthly average, % labels by segment)"
+        ))
+
+    if "Monthly Avg — Desalinated Water (bar)" in plot_options:
+        st.pyplot(_bar_monthly(dates_dt, res['Desal'],
+                               f"MONTHLY AVERAGE — DESALINATED WATER ({Year_res})", "MGD"))
+
+    if "Cumulative From Texoma (line)" in plot_options:
+        st.pyplot(_cumulative_plot(dates_dt, res['Total_From_Tex'],
+                                   f"CUMULATIVE WATER FROM TEXOMA — {Year_res}",
+                                   "CUMULATIVE MG"))
+
+    # ---------- NEW: Time Series & Monthly Bars for ANY result columns ----------
+    st.markdown("---")
+    with st.expander("More plots: Time Series & Monthly Bars for any result columns"):
+        # Build selectable columns from the Results (Daily) df
+        result_df = res['df']
+        all_cols = [c for c in result_df.columns if c != "DATE"]
+        selected_cols = st.multiselect(
+            "Choose result columns:",
+            options=all_cols,
+            default=all_cols[:3] if len(all_cols) >= 3 else all_cols
+        )
+        plot_kinds = st.multiselect(
+            "Choose plot types:",
+            options=["Time Series", "Monthly Average Bar"],
+            default=["Time Series", "Monthly Average Bar"]
+        )
+
+        if selected_cols and plot_kinds:
+            dates_dt_all = pd.to_datetime(result_df["DATE"])
+            for col in selected_cols:
+                series = result_df[col].values
+                if "Time Series" in plot_kinds:
+                    st.pyplot(_plot_series(
+                        dates_dt_all, series,
+                        title=f"{col} — DAILY TIME SERIES ({Year_res})",
+                        ylabel="MGD",
+                        color="tab:blue"
+                    ))
+                if "Monthly Average Bar" in plot_kinds:
+                    st.pyplot(_bar_monthly(
+                        dates_dt_all, series,
+                        title=f"MONTHLY AVERAGE — {col} ({Year_res})",
+                        ylabel="MGD"
+                    ))
+        else:
+            st.info("Select at least one column and one plot type to display these charts.")
+
+    # --- Results table AFTER plots ---
+    st.subheader("Results (Daily)")
+    st.dataframe(res['df'], use_container_width=True, height=420)
+
+    with st.expander("Download results as CSV"):
+        file_name = st.text_input("CSV file name", value="WaterResults_Desal.csv")
+        st.download_button("📥 Download CSV", res['df'].to_csv(index=False), file_name=file_name, mime="text/csv")
+
 else:
     st.info("Set parameters and click **Run Analysis** to compute results. After that, you can switch plots freely without recomputing.")
