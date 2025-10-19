@@ -974,137 +974,136 @@ if st.session_state['results'] is not None:
         st.metric("Sum of Lakes (MGD)", f"{np.mean(res['Lavon_W'])+np.mean(res['Texoma_W'])+np.mean(res['BoisD_L'])+np.mean(res['Texoma_L'])+np.mean(res['Tawakoni_D'])+np.mean(res['Desal']):.1f}",
                   delta=f"Total Demand {np.mean(res['Total_Demand']):.1f}")
 
-    # --- Plots (existing + monthly/cumulative) ---
-    st.subheader("Plots")
-    plot_options = st.multiselect(
-        "Select plots to display:",
-        [
-            # Existing daily plots
-            "Texoma Only",
-            "Total Demand",
-            "Wylie Demand",
-            "Wylie Splits (Texoma vs Lavon)",
-            "Leonard Demand",
-            "Leonard Splits (Texoma vs BoisD)",
-            "Bois D'Arc Flow (with limit line)",
-            "Tawakoni Demand",
-            "Desalinated Water",
-            # Monthly & cumulative views
+    # ---------- Unified Plots (Preset + Custom) ----------
+    with st.expander("All Plots (Preset & Custom)", expanded=True):
+        # --- Preset plots (moved here from previous section) ---
+        preset_options = st.multiselect(
+            "Preset plots to display:",
+            [
+                # Existing daily plots
+                "Texoma Only",
+                "Total Demand",
+                "Wylie Demand",
+                "Wylie Splits (Texoma vs Lavon)",
+                "Leonard Demand",
+                "Leonard Splits (Texoma vs BoisD)",
+                "Bois D'Arc Flow (with limit line)",
+                "Tawakoni Demand",
+                "Desalinated Water",
+                # Monthly & cumulative views
+                "Monthly Avg — Wylie/Leonard/Tawakoni (bar)",
+                "Monthly Avg — Total Demand (bar)",
+                "Monthly Source Mix → Wylie (stacked %)",
+                "Monthly Source Mix → Leonard (stacked %)",
+                "Monthly Avg — Desalinated Water (bar)",
+                "Cumulative From Texoma (line)",
+            ],
+            default=[
+                "Texoma Only",
+                "Total Demand",
+                "Bois D'Arc Flow (with limit line)",
+                "Desalinated Water",
+                "Monthly Avg — Wylie/Leonard/Tawakoni (bar)",
+                "Monthly Source Mix → Wylie (stacked %)",
+            ],
+        )
+
+        # Daily presets
+        if "Texoma Only" in preset_options:
+            st.pyplot(_plot_series(res['dates'], res['Total_From_Tex'],
+                                   f"DAILY WATER FROM TEXOMA ({Year_res})",
+                                   "RAW WATER (MGD)", "blue"))
+        if "Total Demand" in preset_options:
+            st.pyplot(_plot_series(res['dates'], res['Total_Demand'],
+                                   f"DAILY TOTAL DEMAND ({Year_res})",
+                                   "TOTAL WATER DEMAND (MGD)", "purple"))
+        if "Wylie Demand" in preset_options:
+            st.pyplot(_plot_series(res['dates'], res['Wylie_D'],
+                                   f"WYLIE DEMAND — {Year_res}",
+                                   "WYLIE DEMAND (MGD)", "orange"))
+        if "Wylie Splits (Texoma vs Lavon)" in preset_options:
+            fig, ax = plt.subplots(figsize=(12,6))
+            ax.plot(res['dates'], res['Texoma_W'], label="Texoma → Wylie", color="blue")
+            ax.plot(res['dates'], res['Lavon_W'],  label="Lavon → Wylie",  color="gray")
+            ax.set_title(f"WYLIE SPLITS ({Year_res})"); ax.set_xlabel("DATE"); ax.set_ylabel("MGD")
+            ax.legend(); ax.grid(True, which="both", linestyle="--", alpha=0.35); fig.tight_layout(); st.pyplot(fig)
+        if "Leonard Demand" in preset_options:
+            st.pyplot(_plot_series(res['dates'], res['Leonard_D'],
+                                   f"LEONARD DEMAND — {Year_res}",
+                                   "LEONARD DEMAND (MGD)", "green"))
+        if "Leonard Splits (Texoma vs BoisD)" in preset_options:
+            fig, ax = plt.subplots(figsize=(12,6))
+            ax.plot(res['dates'], res['Texoma_L'], label="Texoma → Leonard", color="blue")
+            ax.plot(res['dates'], res['BoisD_L'],  label="Bois d'Arc → Leonard", color="brown")
+            ax.set_title(f"LEONARD SPLITS ({Year_res})"); ax.set_xlabel("DATE"); ax.set_ylabel("MGD")
+            ax.legend(); ax.grid(True, which="both", linestyle="--", alpha=0.35); fig.tight_layout(); st.pyplot(fig)
+        if "Bois D'Arc Flow (with limit line)" in preset_options:
+            st.pyplot(_plot_series(res['dates'], res['BoisD_L'],
+                                   f"BOIS D'ARC → LEONARD — {Year_res}",
+                                   "BOIS D'ARC FLOW (MGD)", "brown", extra_line=res['Max_Avg_From_Bois_DARC']))
+        if "Tawakoni Demand" in preset_options:
+            st.pyplot(_plot_series(res['dates'], res['Tawakoni_D'],
+                                   f"TAWAKONI DEMAND — {Year_res}",
+                                   "TAWAKONI DEMAND (MGD)", "teal"))
+        if "Desalinated Water" in preset_options:
+            st.pyplot(_plot_series(res['dates'], res['Desal'],
+                                   f"DESALINATED WATER — {Year_res}",
+                                   "DESALED FLOW (MGD)", "black"))
+
+        # Monthly/cumulative presets
+        if any(opt in preset_options for opt in [
             "Monthly Avg — Wylie/Leonard/Tawakoni (bar)",
             "Monthly Avg — Total Demand (bar)",
             "Monthly Source Mix → Wylie (stacked %)",
             "Monthly Source Mix → Leonard (stacked %)",
             "Monthly Avg — Desalinated Water (bar)",
             "Cumulative From Texoma (line)",
-        ],
-        default=[
-            "Texoma Only",
-            "Total Demand",
-            "Bois D'Arc Flow (with limit line)",
-            "Desalinated Water",
-            "Monthly Avg — Wylie/Leonard/Tawakoni (bar)",
-            "Monthly Source Mix → Wylie (stacked %)",
-        ],
-    )
+        ]):
+            dates_dt = pd.to_datetime(res['dates'])
 
-    # Existing daily plots
-    if "Texoma Only" in plot_options:
-        st.pyplot(_plot_series(res['dates'], res['Total_From_Tex'],
-                               f"DAILY WATER FROM TEXOMA ({Year_res})",
-                               "RAW WATER (MGD)", "blue"))
-    if "Total Demand" in plot_options:
-        st.pyplot(_plot_series(res['dates'], res['Total_Demand'],
-                               f"DAILY TOTAL DEMAND ({Year_res})",
-                               "TOTAL WATER DEMAND (MGD)", "purple"))
-    if "Wylie Demand" in plot_options:
-        st.pyplot(_plot_series(res['dates'], res['Wylie_D'],
-                               f"WYLIE DEMAND — {Year_res}",
-                               "WYLIE DEMAND (MGD)", "orange"))
-    if "Wylie Splits (Texoma vs Lavon)" in plot_options:
-        fig, ax = plt.subplots(figsize=(12,6))
-        ax.plot(res['dates'], res['Texoma_W'], label="Texoma → Wylie", color="blue")
-        ax.plot(res['dates'], res['Lavon_W'],  label="Lavon → Wylie",  color="gray")
-        ax.set_title(f"WYLIE SPLITS ({Year_res})"); ax.set_xlabel("DATE"); ax.set_ylabel("MGD")
-        ax.legend(); ax.grid(True, which="both", linestyle="--", alpha=0.35); fig.tight_layout(); st.pyplot(fig)
-    if "Leonard Demand" in plot_options:
-        st.pyplot(_plot_series(res['dates'], res['Leonard_D'],
-                               f"LEONARD DEMAND — {Year_res}",
-                               "LEONARD DEMAND (MGD)", "green"))
-    if "Leonard Splits (Texoma vs BoisD)" in plot_options:
-        fig, ax = plt.subplots(figsize=(12,6))
-        ax.plot(res['dates'], res['Texoma_L'], label="Texoma → Leonard", color="blue")
-        ax.plot(res['dates'], res['BoisD_L'],  label="Bois d'Arc → Leonard", color="brown")
-        ax.set_title(f"LEONARD SPLITS ({Year_res})"); ax.set_xlabel("DATE"); ax.set_ylabel("MGD")
-        ax.legend();ax.grid(True, which="both", linestyle="--", alpha=0.35); fig.tight_layout(); st.pyplot(fig)
-    if "Bois D'Arc Flow (with limit line)" in plot_options:
-        st.pyplot(_plot_series(res['dates'], res['BoisD_L'],
-                               f"BOIS D'ARC → LEONARD — {Year_res}",
-                               "BOIS D'ARC FLOW (MGD)", "brown", extra_line=res['Max_Avg_From_Bois_DARC']))
-    if "Tawakoni Demand" in plot_options:
-        st.pyplot(_plot_series(res['dates'], res['Tawakoni_D'],
-                               f"TAWAKONI DEMAND — {Year_res}",
-                               "TAWAKONI DEMAND (MGD)", "teal"))
-    if "Desalinated Water" in plot_options:
-        st.pyplot(_plot_series(res['dates'], res['Desal'],
-                               f"DESALINATED WATER — {Year_res}",
-                               "DESALED FLOW (MGD)", "black"))
+        if "Monthly Avg — Wylie/Leonard/Tawakoni (bar)" in preset_options:
+            st.pyplot(_grouped_monthly_three(
+                dates_dt, res['Wylie_D'], res['Leonard_D'], res['Tawakoni_D'],
+                labels_legend=("Wylie", "Leonard", "Tawakoni"),
+                title=f"MONTHLY AVERAGE — PLANT DEMANDS ({Year_res})",
+                ylabel="MGD"
+            ))
 
-    # Monthly/cumulative plots
-    if any(opt in plot_options for opt in [
-        "Monthly Avg — Wylie/Leonard/Tawakoni (bar)",
-        "Monthly Avg — Total Demand (bar)",
-        "Monthly Source Mix → Wylie (stacked %)",
-        "Monthly Source Mix → Leonard (stacked %)",
-        "Monthly Avg — Desalinated Water (bar)",
-        "Cumulative From Texoma (line)",
-    ]):
-        dates_dt = pd.to_datetime(res['dates'])
+        if "Monthly Avg — Total Demand (bar)" in preset_options:
+            st.pyplot(_bar_monthly(dates_dt, res['Total_Demand'],
+                                   f"MONTHLY AVERAGE — TOTAL DEMAND ({Year_res})", "MGD"))
 
-    if "Monthly Avg — Wylie/Leonard/Tawakoni (bar)" in plot_options:
-        st.pyplot(_grouped_monthly_three(
-            dates_dt, res['Wylie_D'], res['Leonard_D'], res['Tawakoni_D'],
-            labels_legend=("Wylie", "Leonard", "Tawakoni"),
-            title=f"MONTHLY AVERAGE — PLANT DEMANDS ({Year_res})",
-            ylabel="MGD"
-        ))
+        if "Monthly Source Mix → Wylie (stacked %)" in preset_options:
+            st.pyplot(_stacked_monthly_percent(
+                dates_dt,
+                {"Texoma → Wylie": res['Texoma_W'], "Lavon → Wylie": res['Lavon_W']},
+                f"MONTHLY SOURCE MIX → WYLIE ({Year_res})",
+                "MGD (monthly average, % labels by segment)"
+            ))
 
-    if "Monthly Avg — Total Demand (bar)" in plot_options:
-        st.pyplot(_bar_monthly(dates_dt, res['Total_Demand'],
-                               f"MONTHLY AVERAGE — TOTAL DEMAND ({Year_res})", "MGD"))
+        if "Monthly Source Mix → Leonard (stacked %)" in preset_options:
+            st.pyplot(_stacked_monthly_percent(
+                dates_dt,
+                {"Texoma → Leonard": res['Texoma_L'], "Bois d'Arc → Leonard": res['BoisD_L']},
+                f"MONTHLY SOURCE MIX → LEONARD ({Year_res})",
+                "MGD (monthly average, % labels by segment)"
+            ))
 
-    if "Monthly Source Mix → Wylie (stacked %)" in plot_options:
-        st.pyplot(_stacked_monthly_percent(
-            dates_dt,
-            {"Texoma → Wylie": res['Texoma_W'], "Lavon → Wylie": res['Lavon_W']},
-            f"MONTHLY SOURCE MIX → WYLIE ({Year_res})",
-            "MGD (monthly average, % labels by segment)"
-        ))
+        if "Monthly Avg — Desalinated Water (bar)" in preset_options:
+            st.pyplot(_bar_monthly(dates_dt, res['Desal'],
+                                   f"MONTHLY AVERAGE — DESALINATED WATER ({Year_res})", "MGD"))
 
-    if "Monthly Source Mix → Leonard (stacked %)" in plot_options:
-        st.pyplot(_stacked_monthly_percent(
-            dates_dt,
-            {"Texoma → Leonard": res['Texoma_L'], "Bois d'Arc → Leonard": res['BoisD_L']},
-            f"MONTHLY SOURCE MIX → LEONARD ({Year_res})",
-            "MGD (monthly average, % labels by segment)"
-        ))
+        if "Cumulative From Texoma (line)" in preset_options:
+            st.pyplot(_cumulative_plot(dates_dt, res['Total_From_Tex'],
+                                       f"CUMULATIVE WATER FROM TEXOMA — {Year_res}",
+                                       "CUMULATIVE MG"))
 
-    if "Monthly Avg — Desalinated Water (bar)" in plot_options:
-        st.pyplot(_bar_monthly(dates_dt, res['Desal'],
-                               f"MONTHLY AVERAGE — DESALINATED WATER ({Year_res})", "MGD"))
-
-    if "Cumulative From Texoma (line)" in plot_options:
-        st.pyplot(_cumulative_plot(dates_dt, res['Total_From_Tex'],
-                                   f"CUMULATIVE WATER FROM TEXOMA — {Year_res}",
-                                   "CUMULATIVE MG"))
-
-    # ---------- NEW: Time Series & Monthly Bars for ANY result columns ----------
-    st.markdown("---")
-    with st.expander("More plots: Time Series & Monthly Bars for any result columns"):
-        # Build selectable columns from the Results (Daily) df
+        st.markdown("---")
+        # --- Custom plots: Time Series & Monthly Bars for ANY result columns ---
         result_df = res['df']
         all_cols = [c for c in result_df.columns if c != "DATE"]
         selected_cols = st.multiselect(
-            "Choose result columns:",
+            "Custom plots — choose result columns:",
             options=all_cols,
             default=all_cols[:3] if len(all_cols) >= 3 else all_cols
         )
