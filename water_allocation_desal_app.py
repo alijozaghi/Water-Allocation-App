@@ -762,7 +762,22 @@ if len(SCADA_Data_col) != expected_len:
 if pd.isna(SCADA_Data_col).any():
     SCADA_Data_col = SCADA_Data_col.fillna(method="ffill").fillna(method="bfill")
 
-ref_year = str(ref_year)
+# Keep a clean numeric year for reference-year plotting
+ref_year_str = str(ref_year)
+ref_year_num = int(re.sub(r"[^\d]", "", ref_year_str)) if re.search(r"\d", ref_year_str) else Year
+
+# Prepare reference-year dates/series for plotting ORIGINAL reference daily demand
+ref_expected_len = 366 if is_leap_year(ref_year_num) else 365
+ref_dates_for_plot = build_target_dates(ref_year_num)
+ref_series_for_plot = pd.to_numeric(ref_col, errors="coerce")
+
+if len(ref_series_for_plot) == ref_expected_len:
+    if ref_series_for_plot.isna().any():
+        ref_series_for_plot = ref_series_for_plot.fillna(method="ffill").fillna(method="bfill")
+    ref_plot_ok = True
+else:
+    # Fallback: lengths don't match; we will fall back to projection-year alignment when plotting
+    ref_plot_ok = False
 
 # -------------------------------
 # Optimization floors (average MGD) for each plant
@@ -906,10 +921,18 @@ if run:
     numcols = df.select_dtypes(include=[np.number]).columns
     df[numcols] = df[numcols].round(1)
 
+    # Save ref-year plotting info into session results
+    ref_dates_safe = ref_dates_for_plot if ref_plot_ok else dates
+    ref_series_safe = ref_series_for_plot.values if ref_plot_ok else np.asarray(SCADA)
+
     st.session_state['results'] = {
         "df": df,
         "dates": dates,
-        "SCADA": SCADA,
+        "SCADA": SCADA,  # projection-year–aligned reference series (for table and other calcs)
+        "ref_dates": ref_dates_safe,      # used ONLY for plotting reference daily demand by ref-year calendar
+        "ref_series": ref_series_safe,    # ditto
+        "ref_year_num": ref_year_num,
+
         "Wylie_D": Wylie_D,
         "Texoma_W": Texoma_W,
         "Lavon_W": Lavon_W,
@@ -976,7 +999,7 @@ if st.session_state['results'] is not None:
 
     # ---------- Unified Plots (Preset + Custom) ----------
     with st.expander("All Plots (Preset & Custom)", expanded=True):
-        # --- Preset plots (moved here from previous section) ---
+        # --- Preset plots ---
         preset_options = st.multiselect(
             "Preset plots to display:",
             [
@@ -1116,18 +1139,29 @@ if st.session_state['results'] is not None:
         if selected_cols and plot_kinds:
             dates_dt_all = pd.to_datetime(result_df["DATE"])
             for col in selected_cols:
-                series = result_df[col].values
+                # Default to projection-year dates/series
+                col_dates = dates_dt_all
+                col_series = result_df[col].values
+                col_year_label = Year_res
+
+                # Special case: Reference Daily Demand should use reference-year calendar
+                if col.strip().upper() == "REFERENCE DAILY DEMAND (MGD)":
+                    if "ref_dates" in res and "ref_series" in res and res["ref_dates"] is not None:
+                        col_dates = pd.to_datetime(res["ref_dates"])
+                        col_series = np.asarray(res["ref_series"], dtype=float)
+                        col_year_label = res.get("ref_year_num", Year_res)
+
                 if "Time Series" in plot_kinds:
                     st.pyplot(_plot_series(
-                        dates_dt_all, series,
-                        title=f"{col} — DAILY TIME SERIES ({Year_res})",
+                        col_dates, col_series,
+                        title=f"{col} — DAILY TIME SERIES ({col_year_label})",
                         ylabel="MGD",
                         color="tab:blue"
                     ))
                 if "Monthly Average Bar" in plot_kinds:
                     st.pyplot(_bar_monthly(
-                        dates_dt_all, series,
-                        title=f"MONTHLY AVERAGE — {col} ({Year_res})",
+                        col_dates, col_series,
+                        title=f"MONTHLY AVERAGE — {col} ({col_year_label})",
                         ylabel="MGD"
                     ))
         else:
