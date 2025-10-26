@@ -444,14 +444,23 @@ def optimize_ratios_with_desal(
     Wylie_Cap_opt, Leonard_Cap_opt, Tawakoni_Cap_opt,
     Wylie_floor_opt, Leonard_floor_opt, Tawakoni_floor_opt,
 ):
+    """
+    Multi-start SLSQP:
+      - Tries several x0 seeds (capacity-based, equal, W-heavy, L-heavy, WL-heavy, T-heavy)
+      - Keeps the solution with the best (lowest) objective value (objective is -Total_From_Tex)
+      - Everything else (constraints, desal/rebalance logic) stays the same
+    """
     if Peak_Day_Demand <= 0:
         st.error("❌ Peak Day Demand must be > 0.")
         st.stop()
 
+    # --- Compute peak-based ratio limits ---
     rmax_W = min(1.0, Wylie_Cap_opt / Peak_Day_Demand)
     rmax_L = min(1.0, Leonard_Cap_opt / Peak_Day_Demand)
     rmax_T = min(1.0, Tawakoni_Cap_opt / Peak_Day_Demand)
+    rmax = np.array([rmax_W, rmax_L, rmax_T], dtype=float)
 
+    # --- Feasibility check ---
     if (rmax_W + rmax_L + rmax_T) < 1.0 - 1e-6:
         st.error(
             f"❌ Infeasible setup:\n"
@@ -460,13 +469,38 @@ def optimize_ratios_with_desal(
         )
         st.stop()
 
-    rmax = np.array([rmax_W, rmax_L, rmax_T])
-    x0 = rmax / rmax.sum()
+    # Helper: clip to bounds and renormalize to sum=1
+    def _clip_and_renorm(r, rmax_vec):
+        r = np.asarray(r, dtype=float)
+        r = np.maximum(r, 0.0)
+        r = np.minimum(r, rmax_vec)
+        s = r.sum()
+        if s <= 0:
+            # fallback: capacity-based
+            if rmax_vec.sum() <= 0:
+                return np.array([1/3, 1/3, 1/3], dtype=float)
+            r = rmax_vec / rmax_vec.sum()
+        else:
+            r = r / s
+        # final safety bound
+        r = np.minimum(np.maximum(r, 0.0), rmax_vec)
+        r = r / max(r.sum(), 1e-12)
+        return r
 
+    # --- Seed set (all get clipped+renormed) ---
+    seeds_raw = [
+        rmax / rmax.sum(),                                  # capacity-based
+        np.array([1/3, 1/3, 1/3], dtype=float),             # equal
+        np.array([0.80, 0.15, 0.05], dtype=float),          # Wylie-heavy
+        np.array([0.15, 0.80, 0.05], dtype=float),          # Leonard-heavy
+        np.array([0.45, 0.45, 0.10], dtype=float),          # Wylie+Leonard heavy
+        np.array([0.05, 0.05, 0.90], dtype=float),          # Tawakoni-heavy (for completeness)
+    ]
+    seeds = [_clip_and_renorm(s, rmax) for s in seeds_raw]
+
+    # --- Common bounds & constraints for SLSQP ---
     bounds = [(0.0, rmax_W), (0.0, rmax_L), (0.0, rmax_T)]
-
     cons = [{"type": "eq", "fun": lambda x: np.sum(x) - 1.0}]
-
     cons += [
         {"type": "ineq", "fun": lambda r: _avg_mgd_constraint("W", r,
             Year, SCADA_Data, Peak_Day_Demand,
@@ -500,37 +534,75 @@ def optimize_ratios_with_desal(
         )},
     ]
 
-    res = minimize(
-        _objective_max_texoma_with_desal,
-        x0=x0,
-        method="SLSQP",
-        bounds=bounds,
-        constraints=cons,
-        args=(
-            Year, SCADA_Data, Peak_Day_Demand,
-            Mix_Ratio_To_Wylie, Mix_Ratio_To_Leonard,
-            Pipe_Cap_To_Wylie, Pipe_Cap_To_Leonard,
-            Max_Avg_From_Bois_DARC,
-            interval_start_str, interval_end_str, shift_where, include_end,
-            desal_policy, floor_wylie, floor_taw, desal_efficiency,
-            Wylie_Cap_opt, Leonard_Cap_opt, Tawakoni_Cap_opt,
-        ),
-        options={"maxiter": 400, "ftol": 1e-9}
-    )
+    # --- Try each seed; keep the best by objective value (minimize objective = maximize Texoma) ---
+    best_r = None
+    best_obj = np.inf
+    best_success = False
+    best_seed_idx = None
 
-    r = np.clip(res.x if res.success else x0, 0.0, 1.0)
-    s = r.sum()
-    if s <= 0:
-        r = x0
-    else:
-        r /= s
+    for idx, x0 in enumerate(seeds):
+        try:
+            res = minimize(
+                _objective_max_texoma_with_desal,
+                x0=x0,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=cons,
+                args=(
+                    Year, SCADA_Data, Peak_Day_Demand,
+                    Mix_Ratio_To_Wylie, Mix_Ratio_To_Leonard,
+                    Pipe_Cap_To_Wylie, Pipe_Cap_To_Leonard,
+                    Max_Avg_From_Bois_DARC,
+                    interval_start_str, interval_end_str, shift_where, include_end,
+                    desal_policy, floor_wylie, floor_taw, desal_efficiency,
+                    Wylie_Cap_opt, Leonard_Cap_opt, Tawakoni_Cap_opt,
+                ),
+                options={"maxiter": 400, "ftol": 1e-9}
+            )
+            cand = res.x if res.success else x0
+            cand = _clip_and_renorm(cand, rmax)
+            obj = _objective_max_texoma_with_desal(
+                cand,
+                Year, SCADA_Data, Peak_Day_Demand,
+                Mix_Ratio_To_Wylie, Mix_Ratio_To_Leonard,
+                Pipe_Cap_To_Wylie, Pipe_Cap_To_Leonard,
+                Max_Avg_From_Bois_DARC,
+                interval_start_str, interval_end_str, shift_where, include_end,
+                desal_policy, floor_wylie, floor_taw, desal_efficiency,
+                Wylie_Cap_opt, Leonard_Cap_opt, Tawakoni_Cap_opt,
+            )
+            if obj < best_obj:
+                best_obj = obj
+                best_r = cand
+                best_success = res.success
+                best_seed_idx = idx
+        except Exception:
+            # Ignore this seed on any numerical error and continue
+            continue
+
+    # Fallback: if nothing worked (extremely unlikely), use capacity-based
+    if best_r is None:
+        best_r = _clip_and_renorm(rmax / rmax.sum(), rmax)
+        best_success = False
+        best_seed_idx = -1
+
+    r = np.clip(best_r, 0.0, 1.0)
+    r = r / max(r.sum(), 1e-12)
 
     st.success(
-        f"Optimized ratios → "
+        f"Optimized ratios (multi-start) → "
         f"Wylie={r[0]:.3f} (≤ {rmax_W:.3f}), "
         f"Leonard={r[1]:.3f} (≤ {rmax_L:.3f}), "
         f"Tawakoni={r[2]:.3f} (≤ {rmax_T:.3f})"
     )
+    # Optional breadcrumb about which seed won (comment out if you prefer quieter UI)
+    seed_names = ["capacity", "equal", "W-heavy", "L-heavy", "WL-heavy", "T-heavy"]
+    try:
+        if best_seed_idx is not None and 0 <= best_seed_idx < len(seed_names):
+            st.caption(f"Best run started from: **{seed_names[best_seed_idx]}** seed "
+                       f"({'converged' if best_success else 'fallback to seed'})")
+    except Exception:
+        pass
 
     return r
 
